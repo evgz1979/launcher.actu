@@ -113,8 +113,13 @@ final class ServiceProcess {
         try start()
     }
 
-    func open() {
-        if let url = config.url, let target = URL(string: url) {
+    func openAfterStart() {
+        guard let url = config.url, let target = URL(string: url) else {
+            return
+        }
+
+        let delay = config.port == nil ? 0.1 : 0.7
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
             NSWorkspace.shared.open(target)
         }
     }
@@ -255,17 +260,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             restart.representedObject = service.config.id
             projectMenu.addItem(restart)
 
-            if service.config.url != nil {
-                let open = NSMenuItem(
-                    title: "Open \(service.config.name)",
-                    action: #selector(openService(_:)),
-                    keyEquivalent: ""
-                )
-                open.target = self
-                open.representedObject = service.config.id
-                projectMenu.addItem(open)
-            }
-
             projectMenu.addItem(.separator())
         }
 
@@ -350,14 +344,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         do {
             try service.restart()
+            service.openAfterStart()
         } catch {
             showError(error)
         }
         refreshMenu()
-    }
-
-    @objc private func openService(_ sender: NSMenuItem) {
-        service(from: sender)?.open()
     }
 
     @objc private func quit() {

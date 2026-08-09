@@ -4,16 +4,21 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import difflib
 import json
+import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 
 Input = Callable[[str], str]
@@ -237,11 +242,6 @@ def ask_yes_no(prompt: str, input_fn: Input, default: bool = False) -> bool:
     return answer in {"y", "yes", "д", "да"}
 
 
-def ask_value(prompt: str, default: str, input_fn: Input) -> str:
-    answer = ask(f"{prompt} [{default}]: ", input_fn)
-    return answer or default
-
-
 def suggested_entry(root: Path) -> str:
     for name in ("main.py", "app.py"):
         if (root / name).is_file():
@@ -250,36 +250,144 @@ def suggested_entry(root: Path) -> str:
     return python_files[0].name if python_files else "main.py"
 
 
+def suggested_python(root: Path) -> str:
+    return ".venv/bin/python" if (root / ".venv/bin/python").is_file() else "python3"
+
+
+def entry_candidates(root: Path) -> list[str]:
+    python_files = sorted(item.name for item in root.glob("*.py") if item.is_file())
+    preferred = [name for name in ("main.py", "app.py") if name in python_files]
+    return preferred + [name for name in python_files if name not in preferred]
+
+
+def literal_value(node: ast.AST, constants: dict[str, Any]) -> Any:
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        return constants.get(node.id)
+    return None
+
+
+def detect_network(root: Path, entry: str) -> tuple[int | None, str | None]:
+    constants: dict[str, Any] = {}
+    detected_port: int | None = None
+    detected_host: str | None = None
+    source = root / entry
+    if source.is_file():
+        try:
+            tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    value_node = node.value
+                    if value_node is None:
+                        continue
+                    value = literal_value(value_node, constants)
+                    for target in targets:
+                        if isinstance(target, ast.Name) and value is not None:
+                            constants[target.id] = value
+                if isinstance(node, ast.Call):
+                    function_name = ""
+                    if isinstance(node.func, ast.Name):
+                        function_name = node.func.id
+                    elif isinstance(node.func, ast.Attribute):
+                        function_name = node.func.attr
+                    if function_name in {"ThreadingHTTPServer", "HTTPServer", "TCPServer"}:
+                        if node.args and isinstance(node.args[0], ast.Tuple) and len(node.args[0].elts) >= 2:
+                            detected_host = literal_value(node.args[0].elts[0], constants) or detected_host
+                            port = literal_value(node.args[0].elts[1], constants)
+                            if isinstance(port, int):
+                                detected_port = port
+                    if function_name in {"run", "serve"}:
+                        for keyword in node.keywords:
+                            if keyword.arg == "host":
+                                detected_host = literal_value(keyword.value, constants) or detected_host
+                            elif keyword.arg == "port":
+                                port = literal_value(keyword.value, constants)
+                                if isinstance(port, int):
+                                    detected_port = port
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            pass
+
+    port_constant = constants.get("PORT")
+    host_constant = constants.get("HOST")
+    if detected_port is None and isinstance(port_constant, int):
+        detected_port = port_constant
+    if detected_host is None and isinstance(host_constant, str):
+        detected_host = host_constant
+
+    readme_urls: list[str] = []
+    readme = root / "README.md"
+    if readme.is_file():
+        text = readme.read_text(encoding="utf-8")
+        readme_urls = re.findall(r"https?://(?:127\.0\.0\.1|localhost|0\.0\.0\.0):\d+", text)
+    for url in readme_urls:
+        parsed = urlparse(url)
+        if detected_port is None or parsed.port == detected_port:
+            return parsed.port, url.replace("0.0.0.0", "127.0.0.1")
+
+    if detected_port is not None:
+        browser_host = detected_host if detected_host not in {None, "0.0.0.0"} else "127.0.0.1"
+        return detected_port, f"http://{browser_host}:{detected_port}"
+    return None, None
+
+
+def enrich_project_config(config: dict[str, Any], root: Path) -> dict[str, Any]:
+    enriched = {**config, "services": []}
+    for service in config["services"]:
+        updated = dict(service)
+        entry = next((argument for argument in service["command"][1:] if argument.endswith(".py")), None)
+        if entry:
+            port, url = detect_network(root, entry)
+            if port is not None:
+                updated["port"] = port
+            if url is not None:
+                updated["url"] = url
+        enriched["services"].append(updated)
+    return enriched
+
+
 def create_project_config(project: Project, input_fn: Input) -> dict[str, Any]:
-    project_id = ask_value("ID проекта", slug(project.root.name), input_fn)
-    project_name = ask_value("Название проекта", project.root.name, input_fn)
+    project_id = slug(project.root.name)
+    project_name = project.root.name
+    entries = entry_candidates(project.root) or [suggested_entry(project.root)]
     services: list[dict[str, Any]] = []
-    service_number = 1
-    while True:
-        default_service_id = project_id if service_number == 1 else f"{project_id}-{service_number}"
-        service_id = ask_value("ID сервиса", default_service_id, input_fn)
-        service_name = ask_value("Название сервиса", service_id, input_fn)
-        python = ask_value("Python-интерпретатор", ".venv/bin/python", input_fn)
-        entry = ask_value("Точка входа", suggested_entry(project.root), input_fn)
-        port_text = ask("Порт (Enter — без порта): ", input_fn)
-        url = ask("URL (Enter — без URL): ", input_fn)
+    for index, entry in enumerate(entries):
+        service_id = project_id if index == 0 else f"{project_id}-{slug(Path(entry).stem)}"
+        service_name = project_name if index == 0 else Path(entry).stem
+        python = suggested_python(project.root)
+        print(f"Сервис определён автоматически: {service_name} ({python} {entry})")
+        detected_port, detected_url = detect_network(project.root, entry)
+        port_text = ""
+        url = ""
+        if detected_port is not None:
+            print(f"Порт определён автоматически: {detected_port}")
+        else:
+            port_text = ask("Порт (Enter — без порта): ", input_fn)
+        if detected_url is not None:
+            print(f"URL определён автоматически: {detected_url}")
+        else:
+            url = ask("URL (Enter — без URL): ", input_fn)
         service: dict[str, Any] = {
             "id": service_id,
             "name": service_name,
             "command": [python, entry],
             "autoStart": ask_yes_no("Запускать автоматически?", input_fn),
         }
-        if port_text:
+        if detected_port is not None:
+            service["port"] = detected_port
+        elif port_text:
             try:
                 service["port"] = int(port_text)
             except ValueError as error:
                 raise ConfigError("Порт должен быть числом") from error
-        if url:
-            service["url"] = url
+        if detected_url or url:
+            service["url"] = detected_url or url
         services.append(service)
-        if not ask_yes_no("Добавить ещё один сервис?", input_fn):
+        if index == len(entries) - 1 or not ask_yes_no(
+            f"Добавить найденный сервис {entries[index + 1]}?", input_fn
+        ):
             break
-        service_number += 1
 
     value = {
         "version": SCHEMA_VERSION,
@@ -296,6 +404,60 @@ def preview_file(path: Path, value: dict[str, Any]) -> None:
     new = formatted_json(value).splitlines(keepends=True)
     diff = difflib.unified_diff(old, new, fromfile=str(path), tofile=str(path))
     print("".join(diff) or f"Без изменений: {path}")
+
+
+def restart_launcher(repo: Path) -> bool:
+    app = repo / "build/Launcher.app"
+    executable = app / "Contents/MacOS/Launcher"
+    if not executable.is_file():
+        return False
+
+    result = subprocess.run(
+        ["/usr/bin/pgrep", "-f", f"^{re.escape(str(executable))}$"],
+        capture_output=True,
+        text=True,
+    )
+    pids = [int(value) for value in result.stdout.split() if value.isdigit()]
+    if not pids:
+        return False
+
+    subprocess.run(
+        [
+            "/usr/bin/osascript",
+            "-e",
+            'tell application id "local.launcher.menubar" to quit',
+        ],
+        capture_output=True,
+        text=True,
+    )
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if all(not process_exists(pid) for pid in pids):
+            break
+        time.sleep(0.1)
+    for pid in pids:
+        if process_exists(pid):
+            os.kill(pid, signal.SIGTERM)
+
+    launch = subprocess.run(
+        ["/bin/launchctl", "kickstart", "-k", f"gui/{os.getuid()}/local.launcher.menubar"],
+        capture_output=True,
+        text=True,
+    )
+    if launch.returncode != 0:
+        subprocess.run(["/usr/bin/open", str(app)], check=True)
+    print("Launcher перезапущен и применил новую конфигурацию.")
+    return True
+
+
+def process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
 
 
 def scan(documents: Path, repo: Path, input_fn: Input = input) -> int:
@@ -325,6 +487,12 @@ def scan(documents: Path, repo: Path, input_fn: Input = input) -> int:
         if project.config_path.exists():
             try:
                 config = validate_project_config(read_json(project.config_path), project.config_path)
+                enriched = enrich_project_config(config, project.root)
+                if enriched != config:
+                    print(f"\nАвтоматически уточнена конфигурация: {project.config_path}")
+                    preview_file(project.config_path, enriched)
+                    pending_project_files[project.config_path] = enriched
+                    config = enriched
                 validate_project_paths(config, project.root, project.config_path)
             except ConfigError as error:
                 print(f"\nОшибка проекта {project.root}: {error}", file=sys.stderr)
@@ -378,7 +546,12 @@ def scan(documents: Path, repo: Path, input_fn: Input = input) -> int:
     print("\nИтоговая машинная конфигурация:")
     preview_file(machine_path, updated_machine)
     if pending_project_files:
-        print(f"Проектных файлов к созданию: {len(pending_project_files)}")
+        print(f"Проектных файлов к записи: {len(pending_project_files)}")
+    machine_text = formatted_json(updated_machine)
+    machine_changed = not machine_path.exists() or machine_path.read_text(encoding="utf-8") != machine_text
+    if not machine_changed and not pending_project_files:
+        print("Изменений нет. Launcher не перезапускается.")
+        return 0
     if not ask_yes_no("Записать показанные изменения?", input_fn):
         print("Изменения отменены.")
         return 0
@@ -386,8 +559,9 @@ def scan(documents: Path, repo: Path, input_fn: Input = input) -> int:
     for path, value in pending_project_files.items():
         path.write_text(formatted_json(value), encoding="utf-8")
     configs_dir.mkdir(parents=True, exist_ok=True)
-    machine_path.write_text(formatted_json(updated_machine), encoding="utf-8")
+    machine_path.write_text(machine_text, encoding="utf-8")
     print(f"Конфигурация обновлена: {machine_path}")
+    restart_launcher(repo)
     return 0
 
 

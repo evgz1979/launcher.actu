@@ -21,6 +21,25 @@
           "workingDirectory": "/Users/evgz/Documents/launcher.actu"
         }
       ]
+    },
+    {
+      "id": "travel-actu",
+      "name": "travel.actu",
+      "sourcePath": "/Users/evgz/Documents/travel.actu",
+      "services": [
+        {
+          "id": "travel-actu",
+          "name": "travel.actu",
+          "command": [
+            "python3",
+            "main.py"
+          ],
+          "autoStart": false,
+          "port": 8000,
+          "url": "http://127.0.0.1:8000",
+          "workingDirectory": "/Users/evgz/Documents/travel.actu"
+        }
+      ]
     }
   ]
 }

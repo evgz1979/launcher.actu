@@ -70,6 +70,46 @@ class LauncherConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(launcher_config.ConfigError, "повторяющийся id"):
             launcher_config.validate_project_config(value, source)
 
+    def test_detects_port_and_url_from_python_and_readme(self) -> None:
+        project = self.project("web")
+        (project / "main.py").write_text(
+            'from http.server import ThreadingHTTPServer\nHOST = "127.0.0.1"\nPORT = 8000\n'
+            "ThreadingHTTPServer((HOST, PORT), object)\n",
+            encoding="utf-8",
+        )
+        (project / "README.md").write_text(
+            "Открой http://127.0.0.1:8000 после запуска.\n", encoding="utf-8"
+        )
+
+        port, url = launcher_config.detect_network(project, "main.py")
+
+        self.assertEqual(port, 8000)
+        self.assertEqual(url, "http://127.0.0.1:8000")
+
+    def test_enrichment_corrects_previously_entered_port(self) -> None:
+        project = self.project("web")
+        (project / "main.py").write_text("PORT = 8000\n", encoding="utf-8")
+        config = {
+            "version": 1,
+            "id": "web",
+            "name": "web",
+            "enabled": True,
+            "services": [
+                {
+                    "id": "web",
+                    "name": "web",
+                    "command": ["python3", "main.py"],
+                    "port": 8080,
+                    "autoStart": False,
+                }
+            ],
+        }
+
+        enriched = launcher_config.enrich_project_config(config, project)
+
+        self.assertEqual(enriched["services"][0]["port"], 8000)
+        self.assertEqual(enriched["services"][0]["url"], "http://127.0.0.1:8000")
+
     def test_resolves_project_paths_for_machine_config(self) -> None:
         root = self.project("demo")
         config = {
@@ -95,9 +135,11 @@ class LauncherConfigTests(unittest.TestCase):
 
     def test_scan_creates_project_and_machine_configs_after_confirmation(self) -> None:
         project = self.project("demo")
-        answers = iter(["y", "", "", "", "", "", "", "", "", "n", "n", "y"])
+        answers = iter(["y", "", "", "n", "y"])
 
-        with patch.object(launcher_config, "machine_name", return_value="Test-Mac"):
+        with patch.object(launcher_config, "machine_name", return_value="Test-Mac"), patch.object(
+            launcher_config, "restart_launcher", return_value=True
+        ) as restart:
             with redirect_stdout(io.StringIO()):
                 result = launcher_config.scan(
                     self.documents,
@@ -106,11 +148,14 @@ class LauncherConfigTests(unittest.TestCase):
                 )
 
         self.assertEqual(result, 0)
+        restart.assert_called_once_with(self.repo)
         project_config = json.loads((project / "launcher.json").read_text(encoding="utf-8"))
         machine_config = json.loads(
             (self.repo / "configs/test-mac.json").read_text(encoding="utf-8")
         )
         self.assertFalse(project_config["services"][0]["autoStart"])
+        self.assertEqual(project_config["id"], "demo")
+        self.assertEqual(project_config["name"], "demo")
         self.assertEqual(machine_config["machines"], ["Test-Mac"])
         self.assertEqual(machine_config["projects"][0]["id"], "demo")
 
@@ -173,6 +218,39 @@ class LauncherConfigTests(unittest.TestCase):
 
         machine_config = json.loads(machine_path.read_text(encoding="utf-8"))
         self.assertEqual(machine_config["projects"], [])
+
+    def test_unchanged_scan_does_not_restart_launcher(self) -> None:
+        project = self.project("stable")
+        project_config = {
+            "version": 1,
+            "id": "stable",
+            "name": "stable",
+            "enabled": True,
+            "services": [
+                {
+                    "id": "stable",
+                    "name": "stable",
+                    "command": [".venv/bin/python", "main.py"],
+                    "autoStart": False,
+                }
+            ],
+        }
+        (project / "launcher.json").write_text(
+            launcher_config.formatted_json(project_config), encoding="utf-8"
+        )
+        machine = launcher_config.new_machine_config("Test-Mac")
+        machine["projects"] = [launcher_config.resolve_project(project_config, project)]
+        machine_path = self.repo / "configs/test-mac.json"
+        machine_path.write_text(launcher_config.formatted_json(machine), encoding="utf-8")
+
+        with patch.object(launcher_config, "machine_name", return_value="Test-Mac"), patch.object(
+            launcher_config, "restart_launcher"
+        ) as restart:
+            with redirect_stdout(io.StringIO()):
+                result = launcher_config.scan(self.documents, self.repo, input_fn=lambda _prompt: "y")
+
+        self.assertEqual(result, 0)
+        restart.assert_not_called()
 
 
 if __name__ == "__main__":
