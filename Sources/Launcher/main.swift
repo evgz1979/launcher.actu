@@ -40,6 +40,24 @@ struct ProjectConfig: Decodable {
     let services: [ServiceConfig]
 }
 
+struct RemoteLauncherConfig: Decodable {
+    let remoteMachines: [RemoteMachineConfig]
+}
+
+struct RemoteMachineConfig: Decodable {
+    let id: String
+    let name: String
+    let host: String
+    let projects: [RemoteProjectConfig]
+}
+
+struct RemoteProjectConfig: Decodable {
+    let id: String
+    let name: String
+    let port: Int
+    let url: String?
+}
+
 struct ServiceConfig: Decodable {
     let id: String
     let name: String
@@ -151,6 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var statusItem: NSStatusItem!
     private var projects: [ProjectProcess] = []
+    private var remoteMachines: [RemoteMachineConfig] = []
     private var configurationName = "not found"
     private let machineName = currentMachineName()
     private let menu = NSMenu()
@@ -179,6 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     services: project.services.map(ServiceProcess.init)
                 )
             }
+            remoteMachines = try loadRemoteConfig()?.remoteMachines ?? []
             }
         } catch {
             showError(error)
@@ -207,7 +227,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.setSubmenu(projectMenu, for: projectItem)
         }
 
-        if !projects.isEmpty {
+        if !remoteMachines.isEmpty {
+            if !projects.isEmpty {
+                menu.addItem(.separator())
+            }
+            for machine in remoteMachines {
+                let machineItem = NSMenuItem(title: machine.name, action: nil, keyEquivalent: "")
+                let machineMenu = NSMenu(title: machine.name)
+                for project in machine.projects {
+                    let item = NSMenuItem(
+                        title: project.name,
+                        action: #selector(openRemoteProject(_:)),
+                        keyEquivalent: ""
+                    )
+                    item.target = self
+                    item.representedObject = project.url ?? "http://\(machine.host):\(project.port)"
+                    machineMenu.addItem(item)
+                }
+                menu.addItem(machineItem)
+                menu.setSubmenu(machineMenu, for: machineItem)
+            }
+        }
+
+        if !projects.isEmpty || !remoteMachines.isEmpty {
             menu.addItem(.separator())
         }
 
@@ -356,6 +398,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.terminate(nil)
     }
 
+    @objc private func openRemoteProject(_ sender: NSMenuItem) {
+        guard let value = sender.representedObject as? String, let url = URL(string: value) else {
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
     private func service(from item: NSMenuItem) -> ServiceProcess? {
         guard let id = item.representedObject as? String else {
             return nil
@@ -386,9 +435,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 }
 
 func loadConfig(for machineName: String) throws -> LauncherConfig? {
-    let repositoryRoot = Bundle.main.bundleURL
-        .deletingLastPathComponent()
-        .deletingLastPathComponent()
+    let repositoryRoot = repositoryRootURL()
     let candidates = [
         repositoryRoot.appendingPathComponent("configs", isDirectory: true),
         URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -426,6 +473,29 @@ func loadConfig(for machineName: String) throws -> LauncherConfig? {
         throw LauncherError.ambiguousConfiguration(machineName, matches.map(\.name))
     }
     return matches.first
+}
+
+func loadRemoteConfig() throws -> RemoteLauncherConfig? {
+    let candidates = [
+        repositoryRootURL().appendingPathComponent("remote/remotes.json"),
+        URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("remote/remotes.json")
+    ]
+    guard let url = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
+        return nil
+    }
+    do {
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder().decode(RemoteLauncherConfig.self, from: data)
+    } catch {
+        throw LauncherError.invalidConfig(url, error)
+    }
+}
+
+func repositoryRootURL() -> URL {
+    Bundle.main.bundleURL
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
 }
 
 func currentMachineName() -> String {

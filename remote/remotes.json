@@ -1,0 +1,16 @@
+{
+  "remoteMachines": [
+    {
+      "id": "macbook-air",
+      "name": "MacBookAir",
+      "host": "192.168.1.56",
+      "projects": [
+        {
+          "id": "trade-actu",
+          "name": "trade.actu",
+          "port": 8050
+        }
+      ]
+    }
+  ]
+}
