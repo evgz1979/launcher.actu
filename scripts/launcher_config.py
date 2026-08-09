@@ -221,7 +221,6 @@ def new_machine_config(host: str) -> dict[str, Any]:
         "id": slug(host),
         "name": host.replace("-", " "),
         "machines": [host],
-        "ignoredProjects": [],
         "projects": [],
     }
 
@@ -308,7 +307,6 @@ def scan(documents: Path, repo: Path, input_fn: Input = input) -> int:
         machine_path = configs_dir / f"{machine['id']}.json"
         print(f"Для машины {host} будет создана конфигурация {machine_path}.")
 
-    ignored = {str(Path(item).expanduser().resolve()) for item in machine.get("ignoredProjects", []) if isinstance(item, str)}
     existing = {
         project.get("id"): project
         for project in machine.get("projects", [])
@@ -324,8 +322,6 @@ def scan(documents: Path, repo: Path, input_fn: Input = input) -> int:
 
     for project in discover_projects(documents):
         root_key = str(project.root.resolve())
-        if root_key in ignored:
-            continue
         if project.config_path.exists():
             try:
                 config = validate_project_config(read_json(project.config_path), project.config_path)
@@ -343,14 +339,10 @@ def scan(documents: Path, repo: Path, input_fn: Input = input) -> int:
                 pending_project_files[project.config_path] = config
             else:
                 choice = ask(
-                    "1 — пропустить, 2 — игнорировать на этой машине, "
-                    "3 — создать отключённый launcher.json [1]: ",
+                    "1 — пропустить сейчас, 2 — создать отключённый launcher.json [1]: ",
                     input_fn,
                 ) or "1"
                 if choice == "2":
-                    ignored.add(root_key)
-                    remove_existing_source(root_key)
-                elif choice == "3":
                     disabled = {
                         "version": SCHEMA_VERSION,
                         "id": slug(project.root.name),
@@ -380,7 +372,6 @@ def scan(documents: Path, repo: Path, input_fn: Input = input) -> int:
     updated_machine = {
         **machine,
         "machines": machine.get("machines", [host]),
-        "ignoredProjects": sorted(ignored),
         "projects": sorted(existing.values(), key=lambda item: str(item.get("name", "")).casefold()),
     }
 
@@ -407,21 +398,13 @@ def check(documents: Path, repo: Path) -> int:
     problems: list[str] = []
     if machine is None:
         problems.append(f"Нет конфигурации для машины {host}")
-        ignored: set[str] = set()
         generated_projects: dict[str, Any] = {}
     else:
-        ignored = {
-            str(Path(item).expanduser().resolve())
-            for item in machine.get("ignoredProjects", [])
-            if isinstance(item, str)
-        }
         generated_projects = {
             item.get("id"): item for item in machine.get("projects", []) if isinstance(item, dict)
         }
 
     for project in discover_projects(documents):
-        if str(project.root.resolve()) in ignored:
-            continue
         if not project.config_path.exists():
             problems.append(f"Нет launcher.json: {project.root}")
             continue

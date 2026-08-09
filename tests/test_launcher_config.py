@@ -114,9 +114,9 @@ class LauncherConfigTests(unittest.TestCase):
         self.assertEqual(machine_config["machines"], ["Test-Mac"])
         self.assertEqual(machine_config["projects"][0]["id"], "demo")
 
-    def test_scan_can_ignore_project_on_current_machine(self) -> None:
-        project = self.project("ignored")
-        answers = iter(["n", "2", "y"])
+    def test_scan_can_skip_project_without_persisting_the_decision(self) -> None:
+        project = self.project("skipped")
+        answers = iter(["n", "1", "y"])
 
         with patch.object(launcher_config, "machine_name", return_value="Test-Mac"):
             with redirect_stdout(io.StringIO()):
@@ -129,7 +129,8 @@ class LauncherConfigTests(unittest.TestCase):
         machine_config = json.loads(
             (self.repo / "configs/test-mac.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(machine_config["ignoredProjects"], [str(project.resolve())])
+        self.assertNotIn("ignoredProjects", machine_config)
+        self.assertEqual(machine_config["projects"], [])
         self.assertFalse((project / "launcher.json").exists())
 
     def test_disabled_project_removes_generated_machine_entry(self) -> None:
@@ -153,7 +154,6 @@ class LauncherConfigTests(unittest.TestCase):
                     "id": "test-mac",
                     "name": "Test Mac",
                     "machines": ["Test-Mac"],
-                    "ignoredProjects": [],
                     "projects": [
                         {
                             "id": "disabled",
