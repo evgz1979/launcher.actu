@@ -8,3 +8,5 @@
 - Documentation must support explicit semantic versioning. Every document in `docs/` must state its document version, status, and last-updated date near the top.
 - Use SemVer for documentation: increment MAJOR for incompatible architectural or format changes, MINOR for new documented behavior or substantial sections, and PATCH for corrections or clarifications.
 - Record every documentation version in `docs/VERSIONS.md`. When changing documentation, update both the affected document version and the version journal in the same change.
+- When the user explicitly authorizes an outcome, proactively resolve routine local blockers needed to complete it: install or configure required tooling, create narrowly scoped credentials such as a repository-specific SSH key, verify the result, and finish the requested operation without handing routine commands back to the user.
+- Ask the user only when completion requires information or authority that cannot be supplied safely by the agent, such as a password, 2FA code, CAPTCHA confirmation, account recovery, or a materially broader/destructive action.
