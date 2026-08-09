@@ -7,7 +7,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/open</string>
-    <string>/Users/evgz/Documents/launcher/build/Launcher.app</string>
+    <string>/Users/evgz/Documents/launcher.actu/build/Launcher.app</string>
   </array>
   <key>RunAtLoad</key>
   <true/>

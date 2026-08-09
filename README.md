@@ -1,25 +1,37 @@
 # Launcher
 
-Native macOS menu bar launcher for local project scripts and services.
+Нативный лаунчер для строки меню macOS, запускающий локальные скрипты и сервисы.
 
-## Configure
+## Документация
 
-`launcher.json` groups launch entries by project:
+- [Оглавление документации](docs/README.md)
+- [Архитектура](docs/architecture.md)
+- [Формат проектного `launcher.json`](docs/project-config.md)
+- [Спецификация Scanner CLI](docs/scanner-cli.md)
 
-- `actu (data+view)` contains the current local Actu services in `/Users/evgz/Documents/actu`.
-- `actu (manager)` runs the manager command from iCloud Drive.
-- `actu (trade+lang)`, `thai`, `e-mail`, `recoder`, and `media-lib` are ready for future scripts.
-- `port` and `url` are optional, so simple scripts can be added with only `id`, `name`, `command`, and `workingDirectory`.
-- `autoStart` is optional and defaults to `true`; set it to `false` for menu-only scripts.
-- When `port` is present, the launcher clears it before starting the entry.
+Описанные в документации Scanner CLI и проектные `launcher.json` согласованы,
+но пока не реализованы.
 
-## Run during development
+## Текущая конфигурация
+
+Машинные JSON-файлы находятся в `configs/`. Launcher читает их непосредственно
+из репозитория и выбирает файл, в массиве `machines` которого содержится текущий
+macOS `LocalHostName`.
+
+- `port` и `url` необязательны.
+- `autoStart` необязателен и в текущем формате машинной конфигурации по умолчанию
+  равен `true`; значение `false` оставляет сервис только для ручного запуска.
+- Если указан `port`, Launcher освобождает его перед запуском сервиса.
+- Если подходящая конфигурация не найдена, сервисы не запускаются, а в меню
+  отображается соответствующий статус.
+
+## Запуск при разработке
 
 ```bash
-LAUNCHER_CONFIG="$PWD/launcher.json" swift run
+swift run
 ```
 
-## Build an app bundle
+## Сборка приложения
 
 ```bash
 chmod +x scripts/build-app.sh
@@ -27,5 +39,29 @@ chmod +x scripts/build-app.sh
 open build/Launcher.app
 ```
 
-The built app copies `launcher.json` into `Launcher.app/Contents/Resources`.
-Rebuild after changing the bundled config.
+Приложение читает `configs/` из репозитория во время запуска, поэтому после
+изменения JSON пересборка не требуется.
+
+## Автозапуск при входе в macOS
+
+Сначала соберите приложение, затем установите LaunchAgent:
+
+```bash
+mkdir -p "$HOME/Library/LaunchAgents"
+cp local.launcher.menubar.plist "$HOME/Library/LaunchAgents/"
+launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/local.launcher.menubar.plist" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/local.launcher.menubar.plist"
+```
+
+Чтобы запустить его сразу без повторного входа в систему:
+
+```bash
+launchctl kickstart -k "gui/$(id -u)/local.launcher.menubar"
+```
+
+Чтобы удалить Launcher из автозапуска:
+
+```bash
+launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/local.launcher.menubar.plist"
+rm "$HOME/Library/LaunchAgents/local.launcher.menubar.plist"
+```

@@ -1,16 +1,26 @@
 import AppKit
 import Foundation
+import SystemConfiguration
 
 struct LauncherConfig: Decodable {
+    let id: String
+    let name: String
+    let machines: [String]
     let projects: [ProjectConfig]
 
     enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case machines
         case projects
         case services
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(String.self, forKey: .id)
+        self.name = try container.decode(String.self, forKey: .name)
+        self.machines = try container.decode([String].self, forKey: .machines)
 
         if let projects = try container.decodeIfPresent([ProjectConfig].self, forKey: .projects) {
             self.projects = projects
@@ -112,15 +122,18 @@ final class ServiceProcess {
 
 enum LauncherError: LocalizedError {
     case missingCommand(String)
-    case configNotFound
+    case configsDirectoryNotFound
+    case ambiguousConfiguration(String, [String])
     case invalidConfig(URL, Error)
 
     var errorDescription: String? {
         switch self {
         case .missingCommand(let name):
             return "No launch command configured for \(name)."
-        case .configNotFound:
-            return "launcher.json was not found."
+        case .configsDirectoryNotFound:
+            return "The repository configs directory was not found."
+        case .ambiguousConfiguration(let machine, let configs):
+            return "Multiple configurations match \(machine): \(configs.joined(separator: ", "))."
         case .invalidConfig(let url, let error):
             return "Could not read \(url.path): \(error.localizedDescription)"
         }
@@ -133,6 +146,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var statusItem: NSStatusItem!
     private var projects: [ProjectProcess] = []
+    private var configurationName = "not found"
+    private let machineName = currentMachineName()
     private let menu = NSMenu()
 
     override init() {
@@ -151,12 +166,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
 
         do {
-            let config = try loadConfig()
-            projects = config.projects.map { project in
+            if let config = try loadConfig(for: machineName) {
+                configurationName = config.name
+                projects = config.projects.map { project in
                 ProjectProcess(
                     config: project,
                     services: project.services.map(ServiceProcess.init)
                 )
+            }
             }
         } catch {
             showError(error)
@@ -200,6 +217,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
             menu.addItem(.separator())
         }
+
+        let configuration = NSMenuItem(
+            title: "Configuration: \(configurationName) (\(machineName))",
+            action: nil,
+            keyEquivalent: ""
+        )
+        configuration.isEnabled = false
+        menu.addItem(configuration)
+        menu.addItem(.separator())
 
         let quit = NSMenuItem(title: "Exit", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
@@ -368,23 +394,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 }
 
-func loadConfig() throws -> LauncherConfig {
+func loadConfig(for machineName: String) throws -> LauncherConfig? {
+    let repositoryRoot = Bundle.main.bundleURL
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
     let candidates = [
-        ProcessInfo.processInfo.environment["LAUNCHER_CONFIG"].map(URL.init(fileURLWithPath:)),
-        Bundle.main.resourceURL?.appendingPathComponent("launcher.json"),
-        URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("launcher.json")
-    ].compactMap { $0 }
+        repositoryRoot.appendingPathComponent("configs", isDirectory: true),
+        URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("configs", isDirectory: true)
+    ]
+    let fileManager = FileManager.default
 
-    guard let url = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
-        throw LauncherError.configNotFound
+    guard let directory = candidates.first(where: {
+        var isDirectory: ObjCBool = false
+        return fileManager.fileExists(atPath: $0.path, isDirectory: &isDirectory) && isDirectory.boolValue
+    }) else {
+        throw LauncherError.configsDirectoryNotFound
     }
 
-    do {
-        let data = try Data(contentsOf: url)
-        return try JSONDecoder().decode(LauncherConfig.self, from: data)
-    } catch {
-        throw LauncherError.invalidConfig(url, error)
+    let urls = try fileManager.contentsOfDirectory(
+        at: directory,
+        includingPropertiesForKeys: nil
+    )
+    .filter { $0.pathExtension.lowercased() == "json" }
+    .sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+    let configs = try urls.map { url in
+        do {
+            let data = try Data(contentsOf: url)
+            return try JSONDecoder().decode(LauncherConfig.self, from: data)
+        } catch {
+            throw LauncherError.invalidConfig(url, error)
+        }
     }
+    let matches = configs.filter { config in
+        config.machines.contains { $0.caseInsensitiveCompare(machineName) == .orderedSame }
+    }
+
+    guard matches.count < 2 else {
+        throw LauncherError.ambiguousConfiguration(machineName, matches.map(\.name))
+    }
+    return matches.first
+}
+
+func currentMachineName() -> String {
+    if let name = SCDynamicStoreCopyLocalHostName(nil) as String?, !name.isEmpty {
+        return name
+    }
+    return ProcessInfo.processInfo.hostName.replacingOccurrences(of: ".local", with: "")
 }
 
 func expandPath(_ path: String) -> String {
@@ -429,7 +486,9 @@ func killPort(_ port: Int) throws {
     }
 }
 
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.run()
+MainActor.assumeIsolated {
+    let app = NSApplication.shared
+    let delegate = AppDelegate()
+    app.delegate = delegate
+    app.run()
+}

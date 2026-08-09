@@ -7,13 +7,16 @@ CONTENTS="$APP/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 
-swift build -c release --package-path "$ROOT"
-
 rm -rf "$APP"
 mkdir -p "$MACOS" "$RESOURCES"
 
-cp "$ROOT/.build/release/Launcher" "$MACOS/Launcher"
+xcrun swiftc \
+  -O \
+  -framework AppKit \
+  -framework SystemConfiguration \
+  "$ROOT/Sources/Launcher/main.swift" \
+  -o "$MACOS/Launcher"
 cp "$ROOT/Info.plist" "$CONTENTS/Info.plist"
-cp "$ROOT/launcher.json" "$RESOURCES/launcher.json"
+codesign --force --deep --sign - "$APP"
 
 echo "Built $APP"

@@ -1,4 +1,7 @@
 {
+  "id": "previous-machine",
+  "name": "Previous machine",
+  "machines": [],
   "projects": [
     {
       "id": "actu-data-view",
