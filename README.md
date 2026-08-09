@@ -1,6 +1,6 @@
 # Launcher
 
-- **Версия документации:** 1.0.0
+- **Версия документации:** 1.1.0
 - **Статус:** актуальная
 - **Обновлено:** 2026-08-09
 
@@ -14,8 +14,7 @@
 - [Спецификация Scanner CLI](docs/scanner-cli.md)
 - [Версии документации](docs/VERSIONS.md)
 
-Описанные в документации Scanner CLI и проектные `launcher.json` согласованы,
-но пока не реализованы.
+Scanner CLI и проектные `launcher.json` реализованы согласно документации.
 
 ## Текущая конфигурация
 
@@ -35,6 +34,19 @@ macOS `LocalHostName`.
 ```bash
 swift run
 ```
+
+## Scanner CLI
+
+```bash
+./scripts/launcher-config scan
+./scripts/launcher-config check
+./scripts/launcher-config show
+```
+
+`scan` интерактивно сканирует проекты в `~/Documents`, предлагает создать
+отсутствующие проектные `launcher.json` и обновляет конфигурацию текущей машины.
+Сам Scanner CLI добавлен в проектный `launcher.json` этого репозитория и доступен
+в меню Launcher только для ручного запуска.
 
 ## Сборка приложения
 

@@ -4,5 +4,24 @@
   "machines": [
     "Mac-mini-Evgenij"
   ],
-  "projects": []
+  "projects": [
+    {
+      "id": "launcher-actu",
+      "name": "Launcher",
+      "sourcePath": "/Users/evgz/Documents/launcher.actu",
+      "services": [
+        {
+          "id": "scanner-cli",
+          "name": "Scanner CLI",
+          "command": [
+            "/usr/bin/open",
+            "scripts/scan.command"
+          ],
+          "autoStart": false,
+          "workingDirectory": "/Users/evgz/Documents/launcher.actu"
+        }
+      ]
+    }
+  ],
+  "ignoredProjects": []
 }

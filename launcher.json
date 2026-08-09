@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "launcher-actu",
+  "name": "Launcher",
+  "enabled": true,
+  "services": [
+    {
+      "id": "scanner-cli",
+      "name": "Scanner CLI",
+      "command": [
+        "/usr/bin/open",
+        "scripts/scan.command"
+      ],
+      "autoStart": false
+    }
+  ]
+}
