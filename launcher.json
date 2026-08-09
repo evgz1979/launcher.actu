@@ -1,0 +1,71 @@
+{
+  "projects": [
+    {
+      "id": "actu-data-view",
+      "name": "actu (data+view)",
+      "services": [
+        {
+          "id": "data-feeder",
+          "name": "data-feeder",
+          "port": 8051,
+          "url": "http://localhost:8051",
+          "command": [
+            "/Users/evgz/Documents/actu/.venv/bin/python",
+            "datafeeder.py"
+          ],
+          "workingDirectory": "/Users/evgz/Documents/actu"
+        },
+        {
+          "id": "viewer",
+          "name": "viewer",
+          "port": 8050,
+          "url": "http://localhost:8050",
+          "command": [
+            "/Users/evgz/Documents/actu/.venv/bin/python",
+            "main.py"
+          ],
+          "workingDirectory": "/Users/evgz/Documents/actu"
+        }
+      ]
+    },
+    {
+      "id": "actu-manager",
+      "name": "actu (manager)",
+      "services": [
+        {
+          "id": "actu-manager",
+          "name": "manager",
+          "command": [
+            "/Users/evgz/Library/Mobile Documents/com~apple~CloudDocs/Зигзаг/2026/__actu__/start.command"
+          ],
+          "workingDirectory": "/Users/evgz/Library/Mobile Documents/com~apple~CloudDocs/Зигзаг/2026/__actu__"
+        }
+      ]
+    },
+    {
+      "id": "actu-trade-lang",
+      "name": "actu (trade+lang)",
+      "services": []
+    },
+    {
+      "id": "thai",
+      "name": "thai",
+      "services": []
+    },
+    {
+      "id": "e-mail",
+      "name": "e-mail",
+      "services": []
+    },
+    {
+      "id": "recoder",
+      "name": "recoder",
+      "services": []
+    },
+    {
+      "id": "media-lib",
+      "name": "media-lib",
+      "services": []
+    }
+  ]
+}
