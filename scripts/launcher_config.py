@@ -170,7 +170,7 @@ def resolve_project(config: dict[str, Any], root: Path) -> dict[str, Any]:
         command = list(service["command"])
         executable = Path(command[0]).expanduser()
         if not executable.is_absolute() and "/" in command[0]:
-            command[0] = str((root / executable).resolve())
+            command[0] = str(root.resolve() / executable)
 
         working = Path(service.get("workingDirectory", str(root))).expanduser()
         if not working.is_absolute():

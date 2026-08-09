@@ -133,6 +133,31 @@ class LauncherConfigTests(unittest.TestCase):
         )
         self.assertEqual(generated["services"][0]["workingDirectory"], str(root.resolve()))
 
+    def test_preserves_virtualenv_symlink_path(self) -> None:
+        root = self.project("symlinked")
+        python = root / ".venv/bin/python"
+        python.unlink()
+        target = self.root / "shared-python"
+        target.write_text("#!/bin/sh\n", encoding="utf-8")
+        python.symlink_to(target)
+        config = {
+            "id": "symlinked",
+            "name": "symlinked",
+            "services": [
+                {
+                    "id": "symlinked",
+                    "name": "symlinked",
+                    "command": [".venv/bin/python", "main.py"],
+                    "autoStart": False,
+                }
+            ],
+        }
+
+        generated = launcher_config.resolve_project(config, root)
+
+        self.assertEqual(generated["services"][0]["command"][0], str(root.resolve() / ".venv/bin/python"))
+        self.assertNotEqual(generated["services"][0]["command"][0], str(target.resolve()))
+
     def test_scan_creates_project_and_machine_configs_after_confirmation(self) -> None:
         project = self.project("demo")
         answers = iter(["y", "", "", "n", "y"])

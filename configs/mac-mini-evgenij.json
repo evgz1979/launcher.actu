@@ -23,6 +23,37 @@
       ]
     },
     {
+      "id": "media-actu",
+      "name": "media.actu",
+      "sourcePath": "/Users/evgz/Documents/media.actu",
+      "services": [
+        {
+          "id": "media-actu-core",
+          "name": "media.actu Core",
+          "command": [
+            "/Users/evgz/Documents/media.actu/.venv/bin/python",
+            "app.py"
+          ],
+          "autoStart": false,
+          "port": 8765,
+          "url": "http://127.0.0.1:8765",
+          "workingDirectory": "/Users/evgz/Documents/media.actu"
+        },
+        {
+          "id": "media-actu-ui",
+          "name": "media.actu UI",
+          "command": [
+            "/Users/evgz/Documents/media.actu/.venv/bin/python",
+            "ui.py"
+          ],
+          "autoStart": false,
+          "port": 8090,
+          "url": "http://127.0.0.1:8090",
+          "workingDirectory": "/Users/evgz/Documents/media.actu"
+        }
+      ]
+    },
+    {
       "id": "travel-actu",
       "name": "travel.actu",
       "sourcePath": "/Users/evgz/Documents/travel.actu",
