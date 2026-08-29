@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Discover Python projects and build a machine-specific Launcher config."""
+"""Discover and validate project configurations for Launcher."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ import os
 import re
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -36,25 +35,9 @@ class Project:
     config_path: Path
 
 
-def machine_name() -> str:
-    try:
-        result = subprocess.run(
-            ["/usr/sbin/scutil", "--get", "LocalHostName"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        name = result.stdout.strip()
-        if name:
-            return name
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        pass
-    return socket.gethostname().removesuffix(".local")
-
-
 def slug(value: str) -> str:
     normalized = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-    return normalized or "machine"
+    return normalized or "project"
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -73,13 +56,13 @@ def formatted_json(value: dict[str, Any]) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2) + "\n"
 
 
-def is_python_project(path: Path) -> bool:
+def is_project_candidate(path: Path) -> bool:
     if not path.is_dir() or path.name in IGNORED_DIRECTORIES:
-        return False
-    if not (path / "README.md").is_file():
         return False
     if (path / "launcher.json").is_file():
         return True
+    if not (path / "README.md").is_file():
+        return False
     if (path / "pyproject.toml").is_file() or (path / "requirements.txt").is_file():
         return True
     return any(item.is_file() and item.suffix == ".py" for item in path.iterdir())
@@ -91,7 +74,17 @@ def discover_projects(documents: Path) -> list[Project]:
     return [
         Project(path, path / "launcher.json")
         for path in sorted(documents.iterdir(), key=lambda item: item.name.casefold())
-        if is_python_project(path)
+        if is_project_candidate(path)
+    ]
+
+
+def configured_projects(documents: Path) -> list[Project]:
+    if not documents.is_dir():
+        raise ConfigError(f"Каталог проектов не найден: {documents}")
+    return [
+        Project(path, path / "launcher.json")
+        for path in sorted(documents.iterdir(), key=lambda item: item.name.casefold())
+        if path.is_dir() and (path / "launcher.json").is_file()
     ]
 
 
@@ -203,31 +196,6 @@ def validate_project_paths(config: dict[str, Any], root: Path, source: Path) -> 
                 raise ConfigError(f"{source}: исполняемый файл не найден: {executable}")
         elif shutil.which(executable_text) is None:
             raise ConfigError(f"{source}: команда не найдена в PATH: {executable_text}")
-
-
-def load_machine_config(configs_dir: Path, host: str) -> tuple[Path | None, dict[str, Any] | None]:
-    matches: list[tuple[Path, dict[str, Any]]] = []
-    if configs_dir.is_dir():
-        for path in sorted(configs_dir.glob("*.json")):
-            value = read_json(path)
-            machines = value.get("machines", [])
-            if isinstance(machines, list) and any(
-                isinstance(item, str) and item.casefold() == host.casefold() for item in machines
-            ):
-                matches.append((path, value))
-    if len(matches) > 1:
-        names = ", ".join(str(path) for path, _ in matches)
-        raise ConfigError(f"Машина {host} найдена в нескольких конфигурациях: {names}")
-    return matches[0] if matches else (None, None)
-
-
-def new_machine_config(host: str) -> dict[str, Any]:
-    return {
-        "id": slug(host),
-        "name": host.replace("-", " "),
-        "machines": [host],
-        "projects": [],
-    }
 
 
 def ask(prompt: str, input_fn: Input) -> str:
@@ -461,29 +429,9 @@ def process_exists(pid: int) -> bool:
 
 
 def scan(documents: Path, repo: Path, input_fn: Input = input) -> int:
-    host = machine_name()
-    configs_dir = repo / "configs"
-    machine_path, machine = load_machine_config(configs_dir, host)
-    if machine is None:
-        machine = new_machine_config(host)
-        machine_path = configs_dir / f"{machine['id']}.json"
-        print(f"Для машины {host} будет создана конфигурация {machine_path}.")
-
-    existing = {
-        project.get("id"): project
-        for project in machine.get("projects", [])
-        if isinstance(project, dict) and isinstance(project.get("id"), str)
-    }
     pending_project_files: dict[Path, dict[str, Any]] = {}
-    seen_ids: set[str] = set()
-
-    def remove_existing_source(source: str, except_id: str | None = None) -> None:
-        for existing_id, existing_project in list(existing.items()):
-            if existing_id != except_id and existing_project.get("sourcePath") == source:
-                del existing[existing_id]
 
     for project in discover_projects(documents):
-        root_key = str(project.root.resolve())
         if project.config_path.exists():
             try:
                 config = validate_project_config(read_json(project.config_path), project.config_path)
@@ -521,35 +469,35 @@ def scan(documents: Path, repo: Path, input_fn: Input = input) -> int:
                     pending_project_files[project.config_path] = disabled
                 continue
 
-        if config["enabled"]:
-            generated = resolve_project(config, project.root)
-            remove_existing_source(root_key, except_id=generated["id"])
-            existing[generated["id"]] = generated
-            seen_ids.add(generated["id"])
-        else:
-            remove_existing_source(root_key)
-
-    for project_id, project in list(existing.items()):
-        source = project.get("sourcePath")
-        if project_id in seen_ids or not isinstance(source, str) or Path(source).exists():
+    print("\nНастроенные проекты каталога:")
+    configured_ids: dict[str, Path] = {}
+    duplicate_ids: list[str] = []
+    catalog_projects = {project.config_path: project for project in configured_projects(documents)}
+    for path in pending_project_files:
+        catalog_projects.setdefault(path, Project(path.parent, path))
+    for project in sorted(catalog_projects.values(), key=lambda item: item.root.name.casefold()):
+        try:
+            config = pending_project_files.get(project.config_path)
+            if config is None:
+                config = validate_project_config(read_json(project.config_path), project.config_path)
+        except ConfigError:
             continue
-        print(f"\nПроект отсутствует на диске: {source}")
-        if ask_yes_no("Удалить его из машинной конфигурации?", input_fn):
-            del existing[project_id]
+        if not config["enabled"]:
+            continue
+        previous = configured_ids.get(config["id"])
+        if previous is not None:
+            duplicate_ids.append(
+                f"повторяющийся id проекта {config['id']}: {previous}, {project.config_path}"
+            )
+        else:
+            configured_ids[config["id"]] = project.config_path
+        print(f"- {config['name']}: {project.root}")
 
-    updated_machine = {
-        **machine,
-        "machines": machine.get("machines", [host]),
-        "projects": sorted(existing.values(), key=lambda item: str(item.get("name", "")).casefold()),
-    }
-
-    print("\nИтоговая машинная конфигурация:")
-    preview_file(machine_path, updated_machine)
+    if duplicate_ids:
+        raise ConfigError("; ".join(duplicate_ids))
     if pending_project_files:
         print(f"Проектных файлов к записи: {len(pending_project_files)}")
-    machine_text = formatted_json(updated_machine)
-    machine_changed = not machine_path.exists() or machine_path.read_text(encoding="utf-8") != machine_text
-    if not machine_changed and not pending_project_files:
+    if not pending_project_files:
         print("Изменений нет. Launcher не перезапускается.")
         return 0
     if not ask_yes_no("Записать показанные изменения?", input_fn):
@@ -558,37 +506,27 @@ def scan(documents: Path, repo: Path, input_fn: Input = input) -> int:
 
     for path, value in pending_project_files.items():
         path.write_text(formatted_json(value), encoding="utf-8")
-    configs_dir.mkdir(parents=True, exist_ok=True)
-    machine_path.write_text(machine_text, encoding="utf-8")
-    print(f"Конфигурация обновлена: {machine_path}")
+        print(f"Конфигурация обновлена: {path}")
     restart_launcher(repo)
     return 0
 
 
 def check(documents: Path, repo: Path) -> int:
-    host = machine_name()
-    configs_dir = repo / "configs"
-    machine_path, machine = load_machine_config(configs_dir, host)
     problems: list[str] = []
-    if machine is None:
-        problems.append(f"Нет конфигурации для машины {host}")
-        generated_projects: dict[str, Any] = {}
-    else:
-        generated_projects = {
-            item.get("id"): item for item in machine.get("projects", []) if isinstance(item, dict)
-        }
+    project_ids: dict[str, Path] = {}
 
-    for project in discover_projects(documents):
-        if not project.config_path.exists():
-            problems.append(f"Нет launcher.json: {project.root}")
-            continue
+    for project in configured_projects(documents):
         try:
             config = validate_project_config(read_json(project.config_path), project.config_path)
             validate_project_paths(config, project.root, project.config_path)
             if config["enabled"]:
-                generated = resolve_project(config, project.root)
-                if generated_projects.get(generated["id"]) != generated:
-                    problems.append(f"Машинная запись устарела: {project.root}")
+                previous = project_ids.get(config["id"])
+                if previous is not None:
+                    problems.append(
+                        f"Повторяющийся id проекта {config['id']}: {previous}, {project.config_path}"
+                    )
+                else:
+                    project_ids[config["id"]] = project.config_path
         except ConfigError as error:
             problems.append(str(error))
 
@@ -597,19 +535,25 @@ def check(documents: Path, repo: Path) -> int:
         for problem in problems:
             print(f"- {problem}")
         return 1
-    print(f"Проверка пройдена: {machine_path}")
+    print(f"Проверка пройдена: {documents} ({len(project_ids)} проектов)")
     return 0
 
 
-def show(repo: Path) -> int:
-    host = machine_name()
-    path, config = load_machine_config(repo / "configs", host)
-    if config is None:
-        print(f"Для машины {host} конфигурация не найдена.")
-        return 1
-    print(f"Машина: {host}")
-    print(f"Файл: {path}")
-    print(formatted_json(config), end="")
+def show(documents: Path) -> int:
+    projects: list[dict[str, Any]] = []
+    project_ids: dict[str, Path] = {}
+    for project in configured_projects(documents):
+        config = validate_project_config(read_json(project.config_path), project.config_path)
+        if config["enabled"]:
+            previous = project_ids.get(config["id"])
+            if previous is not None:
+                raise ConfigError(
+                    f"Повторяющийся id проекта {config['id']}: {previous}, {project.config_path}"
+                )
+            project_ids[config["id"]] = project.config_path
+            projects.append(resolve_project(config, project.root))
+    print(f"Каталог: {documents}")
+    print(formatted_json({"projects": projects}), end="")
     return 0
 
 
@@ -632,7 +576,7 @@ def main(argv: list[str] | None = None) -> int:
             return scan(args.documents.expanduser().resolve(), args.repo.expanduser().resolve())
         if args.command == "check":
             return check(args.documents.expanduser().resolve(), args.repo.expanduser().resolve())
-        return show(args.repo.expanduser().resolve())
+        return show(args.documents.expanduser().resolve())
     except (ConfigError, OSError) as error:
         print(f"Ошибка: {error}", file=sys.stderr)
         return 2

@@ -36,7 +36,8 @@ class LauncherConfigTests(unittest.TestCase):
 
     def test_discovers_python_and_explicitly_configured_projects(self) -> None:
         python_project = self.project("python")
-        configured_project = self.project("configured", python_file=False)
+        configured_project = self.documents / "configured"
+        configured_project.mkdir()
         (configured_project / "launcher.json").write_text("{}\n", encoding="utf-8")
         self.project("not-python", python_file=False)
 
@@ -110,7 +111,7 @@ class LauncherConfigTests(unittest.TestCase):
         self.assertEqual(enriched["services"][0]["port"], 8000)
         self.assertEqual(enriched["services"][0]["url"], "http://127.0.0.1:8000")
 
-    def test_resolves_project_paths_for_machine_config(self) -> None:
+    def test_resolves_project_paths_for_effective_output(self) -> None:
         root = self.project("demo")
         config = {
             "id": "demo",
@@ -158,13 +159,11 @@ class LauncherConfigTests(unittest.TestCase):
         self.assertEqual(generated["services"][0]["command"][0], str(root.resolve() / ".venv/bin/python"))
         self.assertNotEqual(generated["services"][0]["command"][0], str(target.resolve()))
 
-    def test_scan_creates_project_and_machine_configs_after_confirmation(self) -> None:
+    def test_scan_creates_project_config_after_confirmation(self) -> None:
         project = self.project("demo")
         answers = iter(["y", "", "", "n", "y"])
 
-        with patch.object(launcher_config, "machine_name", return_value="Test-Mac"), patch.object(
-            launcher_config, "restart_launcher", return_value=True
-        ) as restart:
+        with patch.object(launcher_config, "restart_launcher", return_value=True) as restart:
             with redirect_stdout(io.StringIO()):
                 result = launcher_config.scan(
                     self.documents,
@@ -175,35 +174,24 @@ class LauncherConfigTests(unittest.TestCase):
         self.assertEqual(result, 0)
         restart.assert_called_once_with(self.repo)
         project_config = json.loads((project / "launcher.json").read_text(encoding="utf-8"))
-        machine_config = json.loads(
-            (self.repo / "configs/test-mac.json").read_text(encoding="utf-8")
-        )
         self.assertFalse(project_config["services"][0]["autoStart"])
         self.assertEqual(project_config["id"], "demo")
         self.assertEqual(project_config["name"], "demo")
-        self.assertEqual(machine_config["machines"], ["Test-Mac"])
-        self.assertEqual(machine_config["projects"][0]["id"], "demo")
 
     def test_scan_can_skip_project_without_persisting_the_decision(self) -> None:
         project = self.project("skipped")
-        answers = iter(["n", "1", "y"])
+        answers = iter(["n", "1"])
 
-        with patch.object(launcher_config, "machine_name", return_value="Test-Mac"):
-            with redirect_stdout(io.StringIO()):
-                launcher_config.scan(
-                    self.documents,
-                    self.repo,
-                    input_fn=lambda _prompt: next(answers),
-                )
+        with redirect_stdout(io.StringIO()):
+            launcher_config.scan(
+                self.documents,
+                self.repo,
+                input_fn=lambda _prompt: next(answers),
+            )
 
-        machine_config = json.loads(
-            (self.repo / "configs/test-mac.json").read_text(encoding="utf-8")
-        )
-        self.assertNotIn("ignoredProjects", machine_config)
-        self.assertEqual(machine_config["projects"], [])
         self.assertFalse((project / "launcher.json").exists())
 
-    def test_disabled_project_removes_generated_machine_entry(self) -> None:
+    def test_disabled_project_is_not_shown_and_does_not_restart(self) -> None:
         project = self.project("disabled")
         (project / "launcher.json").write_text(
             launcher_config.formatted_json(
@@ -217,32 +205,12 @@ class LauncherConfigTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        machine_path = self.repo / "configs/test-mac.json"
-        machine_path.write_text(
-            launcher_config.formatted_json(
-                {
-                    "id": "test-mac",
-                    "name": "Test Mac",
-                    "machines": ["Test-Mac"],
-                    "projects": [
-                        {
-                            "id": "disabled",
-                            "name": "Disabled",
-                            "sourcePath": str(project.resolve()),
-                            "services": [],
-                        }
-                    ],
-                }
-            ),
-            encoding="utf-8",
-        )
 
-        with patch.object(launcher_config, "machine_name", return_value="Test-Mac"):
+        with patch.object(launcher_config, "restart_launcher") as restart:
             with redirect_stdout(io.StringIO()):
                 launcher_config.scan(self.documents, self.repo, input_fn=lambda _prompt: "y")
 
-        machine_config = json.loads(machine_path.read_text(encoding="utf-8"))
-        self.assertEqual(machine_config["projects"], [])
+        restart.assert_not_called()
 
     def test_unchanged_scan_does_not_restart_launcher(self) -> None:
         project = self.project("stable")
@@ -263,19 +231,39 @@ class LauncherConfigTests(unittest.TestCase):
         (project / "launcher.json").write_text(
             launcher_config.formatted_json(project_config), encoding="utf-8"
         )
-        machine = launcher_config.new_machine_config("Test-Mac")
-        machine["projects"] = [launcher_config.resolve_project(project_config, project)]
-        machine_path = self.repo / "configs/test-mac.json"
-        machine_path.write_text(launcher_config.formatted_json(machine), encoding="utf-8")
 
-        with patch.object(launcher_config, "machine_name", return_value="Test-Mac"), patch.object(
-            launcher_config, "restart_launcher"
-        ) as restart:
+        with patch.object(launcher_config, "restart_launcher") as restart:
             with redirect_stdout(io.StringIO()):
                 result = launcher_config.scan(self.documents, self.repo, input_fn=lambda _prompt: "y")
 
         self.assertEqual(result, 0)
         restart.assert_not_called()
+
+    def test_check_rejects_duplicate_project_ids(self) -> None:
+        for name in ("first", "second"):
+            project = self.project(name)
+            config = {
+                "version": 1,
+                "id": "duplicate",
+                "name": name,
+                "enabled": True,
+                "services": [
+                    {
+                        "id": name,
+                        "name": name,
+                        "command": [".venv/bin/python", "main.py"],
+                        "autoStart": False,
+                    }
+                ],
+            }
+            (project / "launcher.json").write_text(
+                launcher_config.formatted_json(config), encoding="utf-8"
+            )
+
+        with redirect_stdout(io.StringIO()):
+            result = launcher_config.check(self.documents, self.repo)
+
+        self.assertEqual(result, 1)
 
 
 if __name__ == "__main__":

@@ -2,41 +2,11 @@ import AppKit
 import Foundation
 import SystemConfiguration
 
-struct LauncherConfig: Decodable {
-    let id: String
-    let name: String
-    let machines: [String]
-    let projects: [ProjectConfig]
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case name
-        case machines
-        case projects
-        case services
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = try container.decode(String.self, forKey: .id)
-        self.name = try container.decode(String.self, forKey: .name)
-        self.machines = try container.decode([String].self, forKey: .machines)
-
-        if let projects = try container.decodeIfPresent([ProjectConfig].self, forKey: .projects) {
-            self.projects = projects
-            return
-        }
-
-        let services = try container.decodeIfPresent([ServiceConfig].self, forKey: .services) ?? []
-        self.projects = [
-            ProjectConfig(id: "actu", name: "actu", services: services)
-        ]
-    }
-}
-
 struct ProjectConfig: Decodable {
+    let version: Int
     let id: String
     let name: String
+    let enabled: Bool?
     let services: [ServiceConfig]
 }
 
@@ -76,11 +46,18 @@ struct ProjectProcess {
 
 @MainActor
 final class ServiceProcess {
+    let projectID: String
     let config: ServiceConfig
     private(set) var process: Process?
+    private var logPipe: Pipe?
 
-    init(config: ServiceConfig) {
+    init(projectID: String, config: ServiceConfig) {
+        self.projectID = projectID
         self.config = config
+    }
+
+    var reference: String {
+        "\(projectID)/\(config.id)"
     }
 
     var isRunning: Bool {
@@ -109,10 +86,29 @@ final class ServiceProcess {
         }
 
         let log = Pipe()
+        let logPrefix = "[Launcher \(reference)]"
+        log.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            let message = String(decoding: data, as: UTF8.self)
+                .trimmingCharacters(in: .newlines)
+            if !message.isEmpty {
+                NSLog("%@ %@", logPrefix, message)
+            }
+        }
         task.standardOutput = log
         task.standardError = log
-        try task.run()
+        do {
+            try task.run()
+        } catch {
+            log.fileHandleForReading.readabilityHandler = nil
+            throw error
+        }
         process = task
+        logPipe = log
     }
 
     func stop() {
@@ -121,6 +117,8 @@ final class ServiceProcess {
         }
 
         process = nil
+        logPipe?.fileHandleForReading.readabilityHandler = nil
+        logPipe = nil
         if let port = config.port {
             try? killPort(port)
         }
@@ -145,18 +143,24 @@ final class ServiceProcess {
 
 enum LauncherError: LocalizedError {
     case missingCommand(String)
-    case configsDirectoryNotFound
-    case ambiguousConfiguration(String, [String])
+    case projectsDirectoryNotFound(String)
+    case unsupportedProjectVersion(URL, Int)
+    case duplicateProjectID(String, [String])
+    case duplicateServiceID(URL, String)
     case invalidConfig(URL, Error)
 
     var errorDescription: String? {
         switch self {
         case .missingCommand(let name):
             return "No launch command configured for \(name)."
-        case .configsDirectoryNotFound:
-            return "The repository configs directory was not found."
-        case .ambiguousConfiguration(let machine, let configs):
-            return "Multiple configurations match \(machine): \(configs.joined(separator: ", "))."
+        case .projectsDirectoryNotFound(let path):
+            return "The projects directory was not found: \(path)."
+        case .unsupportedProjectVersion(let url, let version):
+            return "Unsupported project configuration version \(version): \(url.path)."
+        case .duplicateProjectID(let id, let paths):
+            return "Duplicate project ID \(id): \(paths.joined(separator: ", "))."
+        case .duplicateServiceID(let url, let id):
+            return "Duplicate service ID \(id): \(url.path)."
         case .invalidConfig(let url, let error):
             return "Could not read \(url.path): \(error.localizedDescription)"
         }
@@ -170,7 +174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var projects: [ProjectProcess] = []
     private var remoteMachines: [RemoteMachineConfig] = []
-    private var configurationName = "not found"
+    private var catalogName = "not found"
     private let machineName = currentMachineName()
     private let menu = NSMenu()
 
@@ -190,16 +194,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
 
         do {
-            if let config = try loadConfig(for: machineName) {
-                configurationName = config.name
-                projects = config.projects.map { project in
+            let catalog = projectsDirectoryURL()
+            catalogName = abbreviatedPath(catalog.path)
+            projects = try loadProjects(from: catalog).map { project in
                 ProjectProcess(
                     config: project,
-                    services: project.services.map(ServiceProcess.init)
+                    services: project.services.map {
+                        ServiceProcess(projectID: project.id, config: $0)
+                    }
                 )
             }
             remoteMachines = try loadRemoteConfig()?.remoteMachines ?? []
-            }
         } catch {
             showError(error)
         }
@@ -266,7 +271,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         let configuration = NSMenuItem(
-            title: "Configuration: \(configurationName) (\(machineName))",
+            title: "Catalog: \(catalogName) (\(machineName))",
             action: nil,
             keyEquivalent: ""
         )
@@ -299,7 +304,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 keyEquivalent: ""
             )
             restart.target = self
-            restart.representedObject = service.config.id
+            restart.representedObject = service.reference
             projectMenu.addItem(restart)
 
             projectMenu.addItem(.separator())
@@ -409,7 +414,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let id = item.representedObject as? String else {
             return nil
         }
-        return allServices.first { $0.config.id == id }
+        return allServices.first { $0.reference == id }
     }
 
     private func project(from item: NSMenuItem) -> ProjectProcess? {
@@ -424,7 +429,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private var autoStartServices: [ServiceProcess] {
-        allServices.filter { $0.config.autoStart != false }
+        allServices.filter { $0.config.autoStart == true }
     }
 
     private func showError(_ error: Error) {
@@ -434,45 +439,89 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 }
 
-func loadConfig(for machineName: String) throws -> LauncherConfig? {
-    let repositoryRoot = repositoryRootURL()
-    let candidates = [
-        repositoryRoot.appendingPathComponent("configs", isDirectory: true),
-        URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent("configs", isDirectory: true)
-    ]
+func loadProjects(from directory: URL) throws -> [ProjectConfig] {
     let fileManager = FileManager.default
-
-    guard let directory = candidates.first(where: {
-        var isDirectory: ObjCBool = false
-        return fileManager.fileExists(atPath: $0.path, isDirectory: &isDirectory) && isDirectory.boolValue
-    }) else {
-        throw LauncherError.configsDirectoryNotFound
+    var isDirectory: ObjCBool = false
+    guard fileManager.fileExists(atPath: directory.path, isDirectory: &isDirectory),
+          isDirectory.boolValue else {
+        throw LauncherError.projectsDirectoryNotFound(directory.path)
     }
 
-    let urls = try fileManager.contentsOfDirectory(
+    let roots = try fileManager.contentsOfDirectory(
         at: directory,
-        includingPropertiesForKeys: nil
+        includingPropertiesForKeys: [.isDirectoryKey],
+        options: [.skipsHiddenFiles]
     )
-    .filter { $0.pathExtension.lowercased() == "json" }
+    .filter { url in
+        (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            && fileManager.fileExists(atPath: url.appendingPathComponent("launcher.json").path)
+    }
     .sorted { $0.lastPathComponent < $1.lastPathComponent }
 
-    let configs = try urls.map { url in
+    let discovered = try roots.compactMap { root -> (ProjectConfig, String)? in
+        let url = root.appendingPathComponent("launcher.json")
         do {
             let data = try Data(contentsOf: url)
-            return try JSONDecoder().decode(LauncherConfig.self, from: data)
+            let config = try JSONDecoder().decode(ProjectConfig.self, from: data)
+            guard config.version == 1 else {
+                throw LauncherError.unsupportedProjectVersion(url, config.version)
+            }
+            let serviceGroups = Dictionary(grouping: config.services, by: \.id)
+            if let duplicate = serviceGroups.first(where: { $0.value.count > 1 }) {
+                throw LauncherError.duplicateServiceID(url, duplicate.key)
+            }
+            guard config.enabled != false else {
+                return nil
+            }
+            return (resolveProject(config, relativeTo: root), url.path)
         } catch {
+            if let launcherError = error as? LauncherError {
+                throw launcherError
+            }
             throw LauncherError.invalidConfig(url, error)
         }
     }
-    let matches = configs.filter { config in
-        config.machines.contains { $0.caseInsensitiveCompare(machineName) == .orderedSame }
-    }
 
-    guard matches.count < 2 else {
-        throw LauncherError.ambiguousConfiguration(machineName, matches.map(\.name))
+    let groups = Dictionary(grouping: discovered, by: { $0.0.id })
+    if let duplicate = groups.first(where: { $0.value.count > 1 }) {
+        throw LauncherError.duplicateProjectID(duplicate.key, duplicate.value.map { $0.1 })
     }
-    return matches.first
+    return discovered.map { $0.0 }
+}
+
+func resolveProject(_ project: ProjectConfig, relativeTo root: URL) -> ProjectConfig {
+    let services = project.services.map { service in
+        var command = service.command
+        if let executable = command.first,
+           executable.contains("/") || executable.hasPrefix("~") {
+            command[0] = resolvePath(executable, relativeTo: root)
+        }
+        let workingDirectory = resolvePath(service.workingDirectory ?? ".", relativeTo: root)
+        return ServiceConfig(
+            id: service.id,
+            name: service.name,
+            port: service.port,
+            url: service.url,
+            command: command,
+            workingDirectory: workingDirectory,
+            autoStart: service.autoStart
+        )
+    }
+    return ProjectConfig(
+        version: project.version,
+        id: project.id,
+        name: project.name,
+        enabled: project.enabled,
+        services: services
+    )
+}
+
+func resolvePath(_ path: String, relativeTo root: URL) -> String {
+    let expanded = expandPath(path)
+    if expanded.hasPrefix("/") {
+        return URL(fileURLWithPath: expanded).standardizedFileURL.path
+    }
+    return root.appendingPathComponent(expanded).standardizedFileURL.path
 }
 
 func loadRemoteConfig() throws -> RemoteLauncherConfig? {
@@ -496,6 +545,22 @@ func repositoryRootURL() -> URL {
     Bundle.main.bundleURL
         .deletingLastPathComponent()
         .deletingLastPathComponent()
+}
+
+func projectsDirectoryURL() -> URL {
+    FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Documents", isDirectory: true)
+}
+
+func abbreviatedPath(_ path: String) -> String {
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    if path == home {
+        return "~"
+    }
+    if path.hasPrefix(home + "/") {
+        return "~/" + path.dropFirst(home.count + 1)
+    }
+    return path
 }
 
 func currentMachineName() -> String {
