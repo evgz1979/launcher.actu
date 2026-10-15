@@ -132,6 +132,16 @@ def validate_project_config(value: dict[str, Any], source: Path) -> dict[str, An
         if not isinstance(normalized["autoStart"], bool):
             raise ConfigError(f"{source}: {field}.autoStart должен быть true или false")
 
+        if "autoRestart" in service:
+            if not isinstance(service["autoRestart"], bool):
+                raise ConfigError(f"{source}: {field}.autoRestart должен быть true или false")
+            normalized["autoRestart"] = service["autoRestart"]
+        if "healthURL" in service:
+            health_url = require_string(service["healthURL"], f"{field}.healthURL", source)
+            if not re.match(r"^https?://", health_url, re.IGNORECASE):
+                raise ConfigError(f"{source}: {field}.healthURL должен начинаться с http:// или https://")
+            normalized["healthURL"] = health_url
+
         if "workingDirectory" in service:
             normalized["workingDirectory"] = require_string(
                 service["workingDirectory"], f"{field}.workingDirectory", source

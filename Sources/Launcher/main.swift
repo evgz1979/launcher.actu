@@ -36,6 +36,8 @@ struct ServiceConfig: Decodable {
     let command: [String]
     let workingDirectory: String?
     let autoStart: Bool?
+    let autoRestart: Bool?
+    let healthURL: String?
 }
 
 @MainActor
@@ -45,11 +47,15 @@ struct ProjectProcess {
 }
 
 @MainActor
-final class ServiceProcess {
+final class ServiceProcess { // Владеет процессом сервиса и явно включённым контролем
     let projectID: String
     let config: ServiceConfig
     private(set) var process: Process?
     private var logPipe: Pipe?
+    private var monitor: Timer?
+    private var requestedRunning = false
+    private var startedAt: Date?
+    private var checkingHealth = false
 
     init(projectID: String, config: ServiceConfig) {
         self.projectID = projectID
@@ -64,7 +70,15 @@ final class ServiceProcess {
         process?.isRunning == true
     }
 
-    func start() throws {
+    func start() throws { // Запускает сервис и включает его контроль при autoRestart
+        requestedRunning = true
+        if config.autoRestart == true && monitor == nil {
+            monitor = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    await self?.checkHealth()
+                }
+            }
+        }
         guard !config.command.isEmpty else {
             throw LauncherError.missingCommand(config.name)
         }
@@ -109,9 +123,48 @@ final class ServiceProcess {
         }
         process = task
         logPipe = log
+        startedAt = Date()
     }
 
-    func stop() {
+    func checkHealth(now: Date = Date(), session: URLSession = .shared) async { // Перезапускает только явно включённый сервис и не отменяет ручной Stop
+        guard requestedRunning, config.autoRestart == true, !checkingHealth else { return }
+        if !isRunning {
+            do {
+                NSLog("[Launcher %@] process exited; restarting", reference)
+                try start()
+            } catch {
+                NSLog("[Launcher %@] restart failed: %@", reference, error.localizedDescription)
+            }
+            return
+        }
+        guard let startedAt, now.timeIntervalSince(startedAt) >= 60,
+              let address = config.healthURL, let url = URL(string: address) else { return }
+        let checkedProcess = process
+        checkingHealth = true
+        defer { checkingHealth = false }
+        let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 3)
+        var healthy = false
+        do {
+            let (data, response) = try await session.data(for: request)
+            let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            healthy = (response as? HTTPURLResponse)?.statusCode == 200
+                && ["ok", "starting"].contains(body?["status"] as? String ?? "")
+        } catch {
+            NSLog("[Launcher %@] health request failed: %@", reference, error.localizedDescription)
+        }
+        guard !healthy, requestedRunning, process === checkedProcess, isRunning else { return }
+        do {
+            NSLog("[Launcher %@] no fresh candle health; restarting", reference)
+            try restart()
+        } catch {
+            NSLog("[Launcher %@] restart failed: %@", reference, error.localizedDescription)
+        }
+    }
+
+    func stop() { // Останавливает сервис и отменяет его автоматическое восстановление
+        requestedRunning = false
+        monitor?.invalidate()
+        monitor = nil
         if let process, process.isRunning {
             process.terminate()
         }
@@ -504,7 +557,9 @@ func resolveProject(_ project: ProjectConfig, relativeTo root: URL) -> ProjectCo
             url: service.url,
             command: command,
             workingDirectory: workingDirectory,
-            autoStart: service.autoStart
+            autoStart: service.autoStart,
+            autoRestart: service.autoRestart,
+            healthURL: service.healthURL
         )
     }
     return ProjectConfig(
@@ -584,10 +639,10 @@ func expandPath(_ path: String) -> String {
     return path
 }
 
-func killPort(_ port: Int) throws {
+func killPort(_ port: Int) throws { // Освобождает порт только от слушающего сервера, сохраняя клиентов
     let lsof = Process()
     lsof.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-    lsof.arguments = ["-ti", ":\(port)"]
+    lsof.arguments = ["-tiTCP:\(port)", "-sTCP:LISTEN"]
 
     let output = Pipe()
     lsof.standardOutput = output

@@ -58,6 +58,21 @@ class LauncherConfigTests(unittest.TestCase):
 
         self.assertFalse(validated["services"][0]["autoStart"])
 
+    def test_watchdog_fields_survive_validation_and_resolution(self) -> None:  # Не теряет включённый контроль при проверке и записи
+        service = {"id": "feeder", "name": "Feeder", "command": ["python3", "datafeeder.py"], "autoRestart": True, "healthURL": "http://127.0.0.1:8051/health"}
+        value = {"version": 1, "id": "actu", "name": "Actu", "services": [service]}
+        normalized = launcher_config.validate_project_config(value, self.root / "launcher.json")
+        resolved = launcher_config.resolve_project(normalized, self.root)["services"][0]
+        self.assertIs(True, resolved["autoRestart"])
+        self.assertEqual(service["healthURL"], resolved["healthURL"])
+
+    def test_watchdog_fields_reject_invalid_types_and_addresses(self) -> None:  # Не принимает повреждённую политику запуска
+        for fields in ({"autoRestart": "yes"}, {"healthURL": "file:///tmp/health"}):
+            service = {"id": "feeder", "name": "Feeder", "command": ["python3"], **fields}
+            value = {"version": 1, "id": "actu", "name": "Actu", "services": [service]}
+            with self.subTest(fields=fields), self.assertRaises(launcher_config.ConfigError):
+                launcher_config.validate_project_config(value, self.root / "launcher.json")
+
     def test_validation_rejects_duplicate_service_ids(self) -> None:
         source = self.root / "launcher.json"
         service = {"id": "web", "name": "Web", "command": ["python3", "main.py"]}
