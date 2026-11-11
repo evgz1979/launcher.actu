@@ -142,6 +142,9 @@ def validate_project_config(value: dict[str, Any], source: Path) -> dict[str, An
                 raise ConfigError(f"{source}: {field}.healthURL должен начинаться с http:// или https://")
             normalized["healthURL"] = health_url
 
+        if "launchdLabel" in service:
+            normalized["launchdLabel"] = require_string(service["launchdLabel"], f"{field}.launchdLabel", source)
+
         if "workingDirectory" in service:
             normalized["workingDirectory"] = require_string(
                 service["workingDirectory"], f"{field}.workingDirectory", source

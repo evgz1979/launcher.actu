@@ -34,6 +34,23 @@ import Testing
     #expect(projects[0].services[0].workingDirectory?.hasSuffix("/actu") == true)
 }
 
+@Test func preservesLaunchdLabelWhenLoadingProject() throws { // Передаёт метку из файла в меню.
+    let catalog = try temporaryCatalog()
+    defer { try? FileManager.default.removeItem(at: catalog) }
+
+    let root = catalog.appendingPathComponent("actu", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let json = """
+    {"version":1,"id":"actu","name":"Actu","services":[
+        {"id":"feeder","name":"Feeder","command":["/bin/launchctl","kickstart"],"launchdLabel":"local.actu.feeder"}
+    ]}
+    """
+    try json.write(to: root.appendingPathComponent("launcher.json"), atomically: true, encoding: .utf8)
+
+    let projects = try loadProjects(from: catalog)
+    #expect(projects.first?.services.first?.launchdLabel == "local.actu.feeder")
+}
+
 @Test func skipsDisabledProject() throws {
     let catalog = try temporaryCatalog()
     defer { try? FileManager.default.removeItem(at: catalog) }

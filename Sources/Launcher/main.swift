@@ -38,6 +38,7 @@ struct ServiceConfig: Decodable {
     let autoStart: Bool?
     let autoRestart: Bool?
     let healthURL: String?
+    var launchdLabel: String? = nil
 }
 
 @MainActor
@@ -68,6 +69,33 @@ final class ServiceProcess { // Владеет процессом сервиса
 
     var isRunning: Bool {
         process?.isRunning == true
+    }
+
+    var menuIsRunning: Bool? { // Читает состояние сервиса для меню.
+        guard let label = config.launchdLabel else { return isRunning }
+
+        let command = Process()
+        command.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        command.arguments = ["print", "gui/\(getuid())/\(label)"]
+        let output = Pipe()
+        command.standardOutput = output
+        command.standardError = FileHandle.nullDevice
+        do {
+            try command.run()
+        } catch {
+            return nil
+        }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        command.waitUntilExit()
+        guard command.terminationReason == .exit else { return nil }
+        if command.terminationStatus == 113 { // Задача отсутствует в launchd.
+            return false
+        }
+        guard command.terminationStatus == 0 else { return nil }
+
+        let lines = String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline)
+        guard let state = lines.first(where: { $0.hasPrefix("\tstate = ") }) else { return nil }
+        return state == "\tstate = running" && lines.contains { $0.hasPrefix("\tpid = ") }
     }
 
     func start() throws { // Запускает сервис и включает его контроль при autoRestart
@@ -346,13 +374,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         for service in project.services {
-            let status = service.isRunning ? "running" : "stopped"
-            let header = NSMenuItem(title: "\(service.config.name) (\(status))", action: nil, keyEquivalent: "")
+            let running = service.menuIsRunning
+            let title = running.map { "\(service.config.name) (\($0 ? "running" : "stopped"))" } ?? service.config.name
+            let header = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             header.isEnabled = false
             projectMenu.addItem(header)
 
             let restart = NSMenuItem(
-                title: service.isRunning ? "Restart \(service.config.name)" : "Start \(service.config.name)",
+                title: running == true ? "Restart \(service.config.name)" : "Start \(service.config.name)",
                 action: #selector(restartService(_:)),
                 keyEquivalent: ""
             )
@@ -559,7 +588,8 @@ func resolveProject(_ project: ProjectConfig, relativeTo root: URL) -> ProjectCo
             workingDirectory: workingDirectory,
             autoStart: service.autoStart,
             autoRestart: service.autoRestart,
-            healthURL: service.healthURL
+            healthURL: service.healthURL,
+            launchdLabel: service.launchdLabel
         )
     }
     return ProjectConfig(

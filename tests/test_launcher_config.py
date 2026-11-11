@@ -73,6 +73,13 @@ class LauncherConfigTests(unittest.TestCase):
             with self.subTest(fields=fields), self.assertRaises(launcher_config.ConfigError):
                 launcher_config.validate_project_config(value, self.root / "launcher.json")
 
+    def test_launchd_label_survives_validation_and_resolution(self) -> None:  # Сохраняет метку для статуса в меню
+        service = {"id": "feeder", "name": "Feeder", "command": ["/bin/launchctl", "kickstart"], "launchdLabel": "local.actu.feeder"}
+        value = {"version": 1, "id": "actu", "name": "Actu", "services": [service]}
+        normalized = launcher_config.validate_project_config(value, self.root / "launcher.json")
+        resolved = launcher_config.resolve_project(normalized, self.root)["services"][0]
+        self.assertEqual(service["launchdLabel"], resolved["launchdLabel"])
+
     def test_validation_rejects_duplicate_service_ids(self) -> None:
         source = self.root / "launcher.json"
         service = {"id": "web", "name": "Web", "command": ["python3", "main.py"]}
