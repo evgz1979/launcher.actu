@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "id": "actu",
+  "name": "Actu · M4",
+  "services": [
+    {
+      "id": "actu-feeder",
+      "name": "Feeder · запуск / перезапуск",
+      "launchdLabel": "local.actu.feeder",
+      "command": [
+        "/bin/launchctl",
+        "kickstart",
+        "-k",
+        "gui/501/local.actu.feeder"
+      ],
+      "autoStart": false,
+      "url": "http://127.0.0.1:8051"
+    },
+    {
+      "id": "actu-viewer",
+      "name": "Viewer · запуск / перезапуск",
+      "launchdLabel": "local.actu.viewer",
+      "command": [
+        "/bin/launchctl",
+        "kickstart",
+        "-k",
+        "gui/501/local.actu.viewer"
+      ],
+      "autoStart": false,
+      "url": "http://127.0.0.1:8053"
+    }
+  ]
+}
